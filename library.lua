@@ -1567,7 +1567,7 @@ do
 			ElementLabel.TextColor3 = RGB(199, 191, 240)
 		end
 		
-		ElementButton.Activated:Connect(ElementData.Call)
+		ElementButton.Activated:Connect(ElementData.Call or ElementData.Callback)
 
 		return ElementData;
 	end
