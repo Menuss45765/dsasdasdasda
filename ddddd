@@ -1,0 +1,140 @@
+-- PandoraV3 Remote ESP Module
+-- Optimized for Luraph & Performance
+return function(S, ESPObjects, player, Camera, CDraw, isTeammate, getEnemyModel, cleanupEnemyModel, resetChams)
+    -- Performance Localization
+    local RunService = game:GetService("RunService")
+    local Players = game:GetService("Players")
+    local CoreGui = game:GetService("CoreGui")
+    local Vector3_new, Vector2_new, Color3_new, Color3_fromRGB = Vector3.new, Vector2.new, Color3.new, Color3.fromRGB
+    local math_abs, math_floor, math_clamp, math_max = math.abs, math.floor, math.clamp, math.max
+    local table_insert = table.insert
+    
+    local _espRayParams = RaycastParams.new()
+    _espRayParams.FilterType = Enum.RaycastFilterType.Exclude
+    _espRayParams.IgnoreWater = true
+
+    local BONES_METADATA = {
+        { "Head", "Head", 1.1 }, { "UpperTorso", "Torso", 1.6 },
+        { "LeftUpperArm", "Left Arm", 1.0 }, { "RightUpperArm", "Right Arm", 1.0 },
+        { "LeftUpperLeg", "Left Leg", 1.0 }, { "RightUpperLeg", "Right Leg", 1.0 }
+    }
+    local BLOOM_LAYERS_METADATA = { { 1.2, 0.25 }, { 2.4, 0.12 }, { 4.0, 0.05 } }
+
+    local function getCharBounds(char, hrp)
+        local head = char:FindFirstChild("Head")
+        local ll   = char:FindFirstChild("Left Leg") or char:FindFirstChild("LeftLowerLeg")
+        local rl   = char:FindFirstChild("Right Leg") or char:FindFirstChild("RightLowerLeg")
+        local top  = head and head.Position + Vector3_new(0, head.Size.Y/2, 0) or hrp.Position + Vector3_new(0,3,0)
+        local bot  = (ll and rl) and Vector3_new(hrp.Position.X, math_max(ll.Position.Y, rl.Position.Y)-1.2, hrp.Position.Z) or hrp.Position - Vector3_new(0,3,0)
+        return top, bot
+    end
+
+    local function hideESP(plr)
+        local obj = ESPObjects[plr]; if not obj then return end
+        for i=1,8 do obj.Corners[i].Visible=false; obj.CornersOutline[i].Visible=false end
+        obj.Name.Visible=false; obj.Distance.Visible=false
+        obj.HealthBg.Visible=false; obj.HealthBar.Visible=false
+        obj.HeadDot.Visible=false
+        if obj.Highlight then obj.Highlight.Enabled=false end
+        if obj.GlowHighlight then obj.GlowHighlight.Enabled=false end
+        if obj.GlowCircles then for _, c in ipairs(obj.GlowCircles) do c.Visible=false end end
+        resetChams(obj)
+    end
+
+    -- Main Rendering Loop
+    RunService.RenderStepped:Connect(function(dt)
+        local myChar = player.Character
+        local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not S.ESP.enabled and not S.ESP.Team.enabled then
+            for p in pairs(ESPObjects) do hideESP(p) end
+            return
+        end
+        
+        local myPos = myHRP and myHRP.Position
+        local viewportSize = Camera.ViewportSize
+        local camPos = Camera.CFrame.Position
+
+        local allPlayers = Players:GetPlayers()
+        for i = 1, #allPlayers do
+            local target = allPlayers[i]
+            if target == player then hideESP(target); continue end
+            local char = target.Character
+            local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+            local hum  = char and char:FindFirstChildOfClass("Humanoid")
+            if not char or not hrp or not hum then hideESP(target); continue end
+            
+            local isTeam = isTeammate(target, player)
+            if S.ESP.teamCheck and isTeam then hideESP(target); continue end
+            
+            local state = isTeam and S.ESP.Team or S.ESP
+            if not state.enabled then hideESP(target); continue end
+            
+            local dist = myPos and (hrp.Position - myPos).Magnitude or 0
+            if dist > (state.maxDist or 1000) then hideESP(target); continue end
+            local pos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+            if not onScreen then hideESP(target); continue end
+
+            local obj = ESPObjects[target]
+            if not obj then continue end
+            
+            -- Visibility check
+            local isVisible = false
+            if myChar then
+                _espRayParams.FilterDescendantsInstances = {myChar, char}
+                local res = workspace:Raycast(camPos, hrp.Position - camPos, _espRayParams)
+                isVisible = not res
+            end
+
+            -- Bounding Box Math
+            local topPos, botPos = getCharBounds(char, hrp)
+            local top = Camera:WorldToViewportPoint(topPos)
+            local bot = Camera:WorldToViewportPoint(botPos)
+            local boxH = math_abs(top.Y - bot.Y)
+            local boxW = boxH * (state.boxScale or 1.5)
+            local cx, cy = top.X, top.Y + boxH/2
+            local tl = Vector2_new(cx-boxW/2, cy-boxH/2)
+            local tr = Vector2_new(cx+boxW/2, cy-boxH/2)
+            local bl = Vector2_new(cx-boxW/2, cy+boxH/2)
+            local br = Vector2_new(cx+boxW/2, cy+boxH/2)
+            local cLen = boxW/4
+            local bColor = isVisible and (state.boxColorVisible or Color3_new(1,0,0)) or (state.boxColorHidden or Color3_new(0,1,0))
+
+            -- Render Elements
+            if state.boxEsp then
+                local pts = (state.boxType == "Normal") and 
+                    {{tl,tr},{tl,tr},{tr,br},{tr,br},{br,bl},{br,bl},{bl,tl},{bl,tl}} or
+                    {{tl, Vector2_new(tl.X+cLen, tl.Y)}, {tl, Vector2_new(tl.X, tl.Y+cLen)}, {tr, Vector2_new(tr.X-cLen, tr.Y)}, {tr, Vector2_new(tr.X, tr.Y+cLen)}, {bl, Vector2_new(bl.X+cLen, bl.Y)}, {bl, Vector2_new(bl.X, bl.Y-cLen)}, {br, Vector2_new(br.X-cLen, br.Y)}, {br, Vector2_new(br.X, br.Y-cLen)}}
+                for j=1,8 do
+                    obj.CornersOutline[j].From=pts[j][1]; obj.CornersOutline[j].To=pts[j][2]; obj.CornersOutline[j].Visible=true
+                    obj.Corners[j].From=pts[j][1]; obj.Corners[j].To=pts[j][2]; obj.Corners[j].Color=bColor; obj.Corners[j].Visible=true
+                end
+            else
+                for j=1,8 do obj.Corners[j].Visible=false; obj.CornersOutline[j].Visible=false end
+            end
+
+            if state.showName then
+                obj.Name.Position=Vector2_new(cx, tl.Y-15); obj.Name.Text=target.DisplayName; obj.Name.Visible=true
+            else obj.Name.Visible=false end
+
+            if state.showDist then
+                obj.Distance.Position=Vector2_new(cx, br.Y+3); obj.Distance.Text=math_floor(dist).." m"; obj.Distance.Visible=true
+            else obj.Distance.Visible=false end
+
+            if state.showHealth then
+                local hp = math_clamp(hum.Health/hum.MaxHealth, 0, 1)
+                local barX = tl.X - 7
+                obj.HealthBg.From=Vector2_new(barX,tl.Y); obj.HealthBg.To=Vector2_new(barX,br.Y); obj.HealthBg.Visible=true
+                obj.HealthBar.From=Vector2_new(barX,br.Y); obj.HealthBar.To=Vector2_new(barX, br.Y-boxH*hp); obj.HealthBar.Visible=true
+            else obj.HealthBg.Visible=false; obj.HealthBar.Visible=false end
+
+            -- Glow Logic
+            if S.ESP.playerGlowEnabled and target ~= player then
+                if not obj.GlowHighlight then 
+                    local h = Instance.new("Highlight"); h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop; h.Parent = CoreGui; obj.GlowHighlight = h 
+                end
+                obj.GlowHighlight.Adornee = char; obj.GlowHighlight.FillColor = S.ESP.playerGlowColor; obj.GlowHighlight.Enabled = true
+                -- Render Bloom Circles...
+            end
+        end
+    end)
+end
